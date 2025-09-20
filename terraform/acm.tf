@@ -37,7 +37,7 @@ resource "aws_route53_record" "main" {
   alias {
   # name                   = kubernetes_ingress_v1.retail_store_ingress.status.0.load_balancer.0.ingress.0.hostname
     name		   = "your-alb-dns-name"
-    zone_id                = "Z035...." # The canonical hosted zone ID of the ALB, often available via data source
+    zone_id                = aws_route53_zone.main.zone_id
     evaluate_target_health = true
   }
 }
