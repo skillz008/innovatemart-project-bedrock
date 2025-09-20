@@ -18,6 +18,9 @@ module "db_orders" {
   password = var.rds_orders_password
   port     = "5432"
 
+  # DISABLE OPTION GROUP FOR POSTGRESQL
+  create_db_option_group = false
+
   # Database parameter group configuration
   family = var.db_parameter_group_family["postgres"]  # <-- This references the new variable
   
@@ -52,6 +55,9 @@ module "db_catalog" {
   username = var.rds_catalog_username
   password = var.rds_catalog_password
   port     = "3306"
+
+  # DISABLE OPTION GROUP FOR MYSQL
+  create_db_option_group = false
 
   # Database parameter group configuration
   family = var.db_parameter_group_family["mysql"]  # <-- This references the new variable
