@@ -41,7 +41,7 @@ The solution is built on a foundation of **Infrastructure as Code (Terraform)** 
 - Once deployed, the application UI will be available at the **Route 53 record URL**:  
 
 ```text
-https://innovatemart.example.com
+https://Skillz008.onmicrosoft.com
 ````
 
 * The output of `terraform apply` provides the final URL.

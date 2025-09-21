@@ -24,7 +24,6 @@ jobs:
         env:
           TF_CLI_ARGS: '-no-color'
 
-      # ---- IMPORTS (move before apply) ----
       - name: Import existing AWS resources
         run: |
           terraform import aws_dynamodb_table.carts innovatemart-bedrock-Carts
@@ -36,7 +35,24 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      - name: Terraform Apply
+      # Step 1: Apply only EKS cluster and dependencies
+      - name: Terraform Apply (EKS only)
+        run: terraform apply -target=aws_eks_cluster.main -auto-approve -input=false
+        working-directory: ./terraform
+        env:
+          TF_CLI_ARGS: '-no-color'
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      # Step 2: Update kubeconfig so the kubernetes provider can connect
+      - name: Configure kubeconfig for EKS
+        run: aws eks update-kubeconfig --region us-east-1 --name innovatemart-bedrock-cluster
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      # Step 3: Apply the rest of the Terraform resources
+      - name: Terraform Apply (all resources)
         run: terraform apply -auto-approve -input=false
         working-directory: ./terraform
         env:
