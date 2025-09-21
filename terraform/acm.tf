@@ -7,7 +7,7 @@ resource "aws_acm_certificate" "main" {
 data "aws_route53_zone" "selected" {
   name         = aws_route53_zone.main.name
   private_zone = false
-  # Add these to ensure only one match
+  # Add these to ensure only one can match
   vpc_id       = null # Ensure it's a public hosted zone
   tags = {
     Project = var.project_name
