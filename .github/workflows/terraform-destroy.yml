@@ -1,4 +1,4 @@
-name: 'Terraform Destroy - COMPLETE RESOURCE DESTRUCTION'
+name: 'Terraform Destroy'
 on:
   workflow_dispatch:  # Manual trigger only - for safety
 
