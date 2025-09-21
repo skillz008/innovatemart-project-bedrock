@@ -23,10 +23,12 @@ resource "aws_route53_record" "acm_validation" {
   ttl             = 60
   type            = each.value.type
   zone_id         = data.aws_route53_zone.selected.zone_id
+
+  # This forces Terraform to wait for the certificate to be created first
+  depends_on = [aws_acm_certificate.main]
 }
 
-# This forces Terraform to wait for the certificate to be created first
-depends_on = [aws_acm_certificate.main]
+
 
 resource "aws_acm_certificate_validation" "main" {
   certificate_arn         = aws_acm_certificate.main.arn
