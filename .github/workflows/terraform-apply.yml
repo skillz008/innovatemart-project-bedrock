@@ -52,6 +52,9 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+      - name: Wait for ACM propagation
+        run: sleep 60
+
       - name: Terraform Refresh (ensure ACM cert state is updated)
         run: terraform refresh
         working-directory: ./terraform
