@@ -1,10 +1,10 @@
-name: 'Terraform Destroy'
+name: 'Terraform Destroy - COMPLETE RESOURCE DESTRUCTION'
 on:
-  workflow_dispatch:  # This allows manual triggering from GitHub UI
+  workflow_dispatch:  # Manual trigger only - for safety
 
 jobs:
-  terraform-destroy:
-    name: 'Terraform Destroy'
+  destroy:
+    name: 'DESTROY ALL Terraform Resources'
     runs-on: ubuntu-latest
     environment: production
 
@@ -14,15 +14,13 @@ jobs:
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.5.0
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Terraform Init
         run: terraform init
@@ -30,10 +28,18 @@ jobs:
         env:
           TF_CLI_ARGS: '-no-color'
 
-      - name: Terraform Destroy
-        run: terraform destroy -auto-approve -input=false
+      - name: Terraform Destroy (COMPLETE DESTRUCTION)
+        run: |
+          echo "🚨 WARNING: This will DESTROY ALL RESOURCES including:"
+          echo "   - EKS Cluster & Node Groups"
+          echo "   - RDS Databases (ALL DATA WILL BE LOST!)"
+          echo "   - DynamoDB Tables"
+          echo "   - VPC, Subnets, NAT Gateway"
+          echo "   - IAM Users and Roles"
+          echo "   - Route53 Hosted Zones"
+          echo "   - ACM Certificates"
+          echo "🚨 THIS ACTION IS PERMANENT AND CANNOT BE UNDONE!"
+          terraform destroy -auto-approve -input=false
         working-directory: ./terraform
         env:
           TF_CLI_ARGS: '-no-color'
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
