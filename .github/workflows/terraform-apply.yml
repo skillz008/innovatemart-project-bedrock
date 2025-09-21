@@ -59,3 +59,12 @@ jobs:
           TF_CLI_ARGS: '-no-color'
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      # Step 4: Final convergence apply (fixes for_each dependency issues)
+      - name: Terraform Apply (final convergence)
+        run: terraform apply -auto-approve -input=false
+        working-directory: ./terraform
+        env:
+          TF_CLI_ARGS: '-no-color'
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
