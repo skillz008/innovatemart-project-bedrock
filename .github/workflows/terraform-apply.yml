@@ -36,7 +36,6 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      # Step 1: Apply only EKS cluster and dependencies
       - name: Terraform Apply (EKS only)
         run: terraform apply -target=aws_eks_cluster.main -auto-approve -input=false
         working-directory: ./terraform
@@ -45,15 +44,50 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      # Step 2: Update kubeconfig so the kubernetes provider can connect
+      # --- ACM staged apply workaround starts here ---
+      - name: Terraform Apply (ACM certificate only)
+        run: terraform apply -target=aws_acm_certificate.main -auto-approve -input=false
+        working-directory: ./terraform
+        env:
+          TF_CLI_ARGS: '-no-color'
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Wait for ACM propagation
+        run: sleep 60
+
+      - name: Terraform Refresh (ensure ACM cert state is updated)
+        run: terraform refresh
+        working-directory: ./terraform
+        env:
+          TF_CLI_ARGS: '-no-color'
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Apply (ACM DNS validation only)
+        run: terraform apply -target=aws_route53_record.acm_validation -auto-approve -input=false
+        working-directory: ./terraform
+        env:
+          TF_CLI_ARGS: '-no-color'
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      # --- ACM staged apply workaround ends here ---
+
       - name: Configure kubeconfig for EKS
         run: aws eks update-kubeconfig --region us-east-1 --name innovatemart-bedrock-cluster
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      # Step 3: Apply the rest of the Terraform resources
       - name: Terraform Apply (all resources)
+        run: terraform apply -auto-approve -input=false
+        working-directory: ./terraform
+        env:
+          TF_CLI_ARGS: '-no-color'
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Apply (final convergence)
         run: terraform apply -auto-approve -input=false
         working-directory: ./terraform
         env:
