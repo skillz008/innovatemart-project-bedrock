@@ -36,24 +36,85 @@ jobs:
       id: init
       run: terraform init
 
+    - name: Check Terraform State
+      id: check_state
+      run: |
+        if terraform state list >/dev/null 2>&1; then
+          echo "state_exists=true" >> $GITHUB_OUTPUT
+          echo "Resources in state:"
+          terraform state list
+        else
+          echo "state_exists=false" >> $GITHUB_OUTPUT
+          echo "No Terraform state found"
+        fi
+
+    - name: Terraform Plan (Dry Run)
+      id: plan
+      if: steps.check_state.outputs.state_exists == 'true'
+      run: terraform plan -destroy
+
     - name: Terraform Destroy
       id: destroy
+      if: steps.check_state.outputs.state_exists == 'true'
       run: terraform destroy -auto-approve
       env:
-        # Database credentials (required for destroy to properly handle RDS)
         TF_VAR_rds_orders_username: ${{ secrets.RDS_ORDERS_USERNAME }}
         TF_VAR_rds_orders_password: ${{ secrets.RDS_ORDERS_PASSWORD }}
         TF_VAR_rds_catalog_username: ${{ secrets.RDS_CATALOG_USERNAME }}
         TF_VAR_rds_catalog_password: ${{ secrets.RDS_CATALOG_PASSWORD }}
 
-    - name: Verify Destruction
+    - name: Check if Resources Exist in AWS
+      if: steps.check_state.outputs.state_exists == 'false'
       run: |
-        echo "Infrastructure destruction completed successfully"
-        echo "Destroyed resources include:"
-        echo "- EKS Cluster: $(terraform output -raw cluster_name 2>/dev/null || echo 'Destroyed')"
-        echo "- VPC and associated networking"
-        echo "- RDS Databases (Orders and Catalog)"
-        echo "- DynamoDB Table"
-        echo "- Route53 Hosted Zone"
-        echo "- ACM Certificate"
-        echo "- IAM User and Policies"
+        echo "Checking for existing resources in AWS..."
+        
+        # Check for EKS cluster
+        if aws eks list-clusters --query "clusters" --output text | grep -q "${VAR_PROJECT_NAME}"; then
+          echo "WARNING: EKS cluster exists but not in Terraform state"
+        else
+          echo "✓ No EKS clusters found"
+        fi
+        
+        # Check for VPC
+        if aws ec2 describe-vpcs --filters "Name=tag:Project,Values=${VAR_PROJECT_NAME}" --query "Vpcs[].VpcId" --output text | grep -q "vpc-"; then
+          echo "WARNING: VPC exists but not in Terraform state"
+        else
+          echo "✓ No VPCs found with project tags"
+        fi
+        
+        # Check for RDS instances
+        if aws rds describe-db-instances --query "DBInstances[?contains(DBInstanceIdentifier, '${VAR_PROJECT_NAME}')].DBInstanceIdentifier" --output text | grep -q "db-"; then
+          echo "WARNING: RDS instances exist but not in Terraform state"
+        else
+          echo "✓ No RDS instances found"
+        fi
+        
+        # Check for DynamoDB tables
+        if aws dynamodb list-tables --query "TableNames[?contains(@, '${VAR_PROJECT_NAME}')]" --output text | grep -q "Carts"; then
+          echo "WARNING: DynamoDB tables exist but not in Terraform state"
+        else
+          echo "✓ No DynamoDB tables found"
+        fi
+      env:
+        VAR_PROJECT_NAME: ${{ vars.PROJECT_NAME || 'innovatemart-bedrock' }}
+
+    - name: Handle Missing State
+      if: steps.check_state.outputs.state_exists == 'false'
+      run: |
+        echo "::warning::No Terraform state found. This could mean:"
+        echo "1. Infrastructure was never created with Terraform"
+        echo "2. Infrastructure was already destroyed"
+        echo "3. Terraform state file is missing"
+        echo ""
+        echo "If you need to destroy manually, check the AWS console for remaining resources."
+
+    - name: Final Verification
+      run: |
+        echo "=== Destruction Summary ==="
+        if [ "${{ steps.check_state.outputs.state_exists }}" = "true" ]; then
+          echo "✓ Terraform destroy completed"
+          echo "✓ State file was present and processed"
+        else
+          echo "⚠ No Terraform state found - manual verification required"
+          echo "Please check AWS console for any remaining resources"
+        fi
