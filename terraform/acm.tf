@@ -4,7 +4,6 @@ resource "aws_acm_certificate" "main" {
 }
 
 data "aws_route53_zone" "selected" {
-  name         = "Skillz008.onmicrosoft.com"
   private_zone = false
 }
 
