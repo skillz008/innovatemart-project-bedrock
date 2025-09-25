@@ -11,7 +11,6 @@ env:
   TERRAFORM_VERSION: '1.5.0'
   TF_WORKING_DIR: 'terraform'
 
-# Set permissions at the workflow level
 permissions:
   contents: read
   pull-requests: write
@@ -21,12 +20,6 @@ jobs:
   terraform:
     name: 'Terraform'
     runs-on: ubuntu-latest
-
-    # You can also set permissions at the job level (more specific)
-    permissions:
-      contents: read
-      pull-requests: write
-      id-token: write
 
     steps:
     - name: Checkout code
@@ -69,22 +62,21 @@ jobs:
       env:
         PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
       with:
-        # Use the GITHUB_TOKEN which now has pull-requests: write permission
         script: |
-          const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
-          #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
-          #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
-          #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
-
-          <details><summary>Show Plan</summary>
-
-          \`\`\`\n
-          ${process.env.PLAN}
-          \`\`\`
-
-          </details>`;
-
           try {
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`\n
+            ${process.env.PLAN}
+            \`\`\`
+
+            </details>`;
+
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -92,8 +84,7 @@ jobs:
               body: output
             });
           } catch (error) {
-            console.log('Could not create comment. This is expected for PRs from forks.');
-            console.log(error);
+            console.log('Could not create comment.');
           }
 
     - name: Terraform Apply
@@ -102,26 +93,64 @@ jobs:
         cd ${{ env.TF_WORKING_DIR }}
         terraform apply -auto-approve -input=false
 
-    - name: Setup Kubernetes
+    - name: Verify AWS Authentication
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        echo "Verifying AWS credentials..."
+        aws sts get-caller-identity
+        aws eks list-clusters --region ${{ env.AWS_REGION }}
+
+    - name: Setup EKS Access
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
         # Install kubectl
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+        
+        # Get cluster info
+        cd ${{ env.TF_WORKING_DIR }}
+        CLUSTER_NAME=$(terraform output -raw cluster_id)
+        echo "Setting up access to cluster: $CLUSTER_NAME"
+        
+        # Update kubeconfig with retry logic
+        for i in {1..5}; do
+          if aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name $CLUSTER_NAME; then
+            echo "Kubeconfig updated successfully"
+            break
+          else
+            echo "Attempt $i failed, retrying in 10 seconds..."
+            sleep 10
+          fi
+        done
+        
+        # Verify cluster access
+        echo "Verifying cluster access..."
+        kubectl cluster-info
+        kubectl get nodes
 
     - name: Deploy Application
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
-        CLUSTER_NAME="innovatemart-eks"
-        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name $CLUSTER_NAME
+        echo "Starting application deployment..."
         
-        # Deploy application
+        # Apply with validation
         kubectl apply -f kubernetes/retail-store-app.yaml
         kubectl apply -f kubernetes/ingress.yaml
         
-        # Wait for deployment
-        kubectl wait --for=condition=ready pod --all --timeout=600s
+        # Wait for deployment with progress indication
+        echo "Waiting for all pods to be ready..."
+        for i in {1..30}; do
+          if kubectl wait --for=condition=ready pod --all --timeout=60s 2>/dev/null; then
+            echo "All pods are ready!"
+            break
+          else
+            echo "Waiting for pods... ($i/30)"
+            sleep 10
+          fi
+        done
         
-        # Get application URL
-        ALB_URL=$(kubectl get ingress retail-store-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Not ready")
-        echo "Application URL: http://$ALB_URL"
+        # Get application info
+        ALB_URL=$(kubectl get ingress retail-store-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Check AWS console for ALB")
+        echo "🎉 Application deployed successfully!"
+        echo "🌐 Access your application at: http://$ALB_URL"
