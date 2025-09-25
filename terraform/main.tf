@@ -263,3 +263,34 @@ output "aws_region" {
   description = "AWS region"
   value       = var.aws_region
 }
+
+# IAM policy for Load Balancer Controller (if using node group role)
+resource "aws_iam_role_policy_attachment" "alb_controller" {
+  count = var.enable_alb_controller ? 1 : 0
+
+  policy_arn = aws_iam_policy.alb_controller[0].arn
+  role       = module.eks.eks_managed_node_groups.main.iam_role_name
+}
+
+resource "aws_iam_policy" "alb_controller" {
+  count = var.enable_alb_controller ? 1 : 0
+
+  name        = "ALBControllerPolicy"
+  description = "Policy for AWS Load Balancer Controller"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:Describe*",
+          "elasticloadbalancing:*",
+          "acm:ListCertificates",
+          "acm:DescribeCertificate"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}

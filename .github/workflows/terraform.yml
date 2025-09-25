@@ -1,0 +1,127 @@
+name: 'Terraform CI/CD'
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_REGION: 'us-east-1'
+  TERRAFORM_VERSION: '1.5.0'
+  TF_WORKING_DIR: 'terraform'
+
+# Set permissions at the workflow level
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  terraform:
+    name: 'Terraform'
+    runs-on: ubuntu-latest
+
+    # You can also set permissions at the job level (more specific)
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Terraform Format
+      id: fmt
+      run: terraform -chdir=${{ env.TF_WORKING_DIR }} fmt -check -recursive
+      continue-on-error: true
+
+    - name: Terraform Init
+      id: init
+      run: terraform -chdir=${{ env.TF_WORKING_DIR }} init
+
+    - name: Terraform Validate
+      id: validate
+      run: terraform -chdir=${{ env.TF_WORKING_DIR }} validate
+
+    - name: Terraform Plan
+      id: plan
+      if: github.event_name == 'pull_request'
+      run: terraform -chdir=${{ env.TF_WORKING_DIR }} plan -no-color -input=false
+      continue-on-error: true
+
+    - name: Update Pull Request
+      uses: actions/github-script@v6
+      if: github.event_name == 'pull_request'
+      env:
+        PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+      with:
+        # Use the GITHUB_TOKEN which now has pull-requests: write permission
+        script: |
+          const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+          #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+          #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+          #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+
+          <details><summary>Show Plan</summary>
+
+          \`\`\`\n
+          ${process.env.PLAN}
+          \`\`\`
+
+          </details>`;
+
+          try {
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+          } catch (error) {
+            console.log('Could not create comment. This is expected for PRs from forks.');
+            console.log(error);
+          }
+
+    - name: Terraform Apply
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform apply -auto-approve -input=false
+
+    - name: Setup Kubernetes
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        # Install kubectl
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+    - name: Deploy Application
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        CLUSTER_NAME="innovatemart-eks"
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name $CLUSTER_NAME
+        
+        # Deploy application
+        kubectl apply -f kubernetes/retail-store-app.yaml
+        kubectl apply -f kubernetes/ingress.yaml
+        
+        # Wait for deployment
+        kubectl wait --for=condition=ready pod --all --timeout=600s
+        
+        # Get application URL
+        ALB_URL=$(kubectl get ingress retail-store-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Not ready")
+        echo "Application URL: http://$ALB_URL"
