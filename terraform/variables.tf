@@ -27,3 +27,10 @@ variable "public_subnets" {
   type        = list(string)
   default     = ["10.0.101.0/24", "10.0.102.0/24"]
 }
+
+# Add this variable
+variable "enable_alb_controller" {
+  description = "Whether to enable AWS Load Balancer Controller permissions"
+  type        = bool
+  default     = true
+}
