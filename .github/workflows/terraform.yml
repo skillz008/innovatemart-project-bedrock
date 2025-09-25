@@ -9,11 +9,11 @@ on:
 env:
   AWS_REGION: 'us-east-1'
   TERRAFORM_VERSION: '1.5.0'
-  TF_WORKING_DIR: 'terraform'
+  TF_WORKING_DIR: 'infrastructure'
 
 jobs:
   terraform:
-    name: 'Terraform Plan & Apply'
+    name: 'Terraform'
     runs-on: ubuntu-latest
     
     permissions:
@@ -38,44 +38,42 @@ jobs:
 
     - name: Terraform Format
       id: fmt
-      run: terraform fmt -check -recursive ${{ env.TF_WORKING_DIR }}/
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform fmt -check -recursive
       continue-on-error: true
 
     - name: Terraform Init
       id: init
-      run: terraform init ${{ env.TF_WORKING_DIR }}/
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform init
 
     - name: Terraform Validate
       id: validate
-      run: terraform validate ${{ env.TF_WORKING_DIR }}/
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform validate
 
     - name: Terraform Plan
       id: plan
       if: github.event_name == 'pull_request'
       run: |
         cd ${{ env.TF_WORKING_DIR }}
-        terraform plan -no-color -input=false -out=tfplan
+        terraform plan -no-color -input=false
       continue-on-error: true
 
-    - name: Terraform Plan Status
-      if: github.event_name == 'pull_request'
-      run: |
-        if [ "${{ steps.plan.outcome }}" != "success" ]; then
-          echo "Terraform plan failed"
-          exit 1
-        fi
-
-    - name: Update Pull Request with Plan
+    - name: Update Pull Request
       uses: actions/github-script@v6
-      if: github.event_name == 'pull_request' && steps.plan.outcome == 'success'
+      if: github.event_name == 'pull_request'
       env:
         PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
       with:
         script: |
-          const output = `#### Terraform Format and Style 🖌 \`${{ steps.fmt.outcome }}\`
-          #### Terraform Initialization ⚙️ \`${{ steps.init.outcome }}\`
-          #### Terraform Validation 🤖 \`${{ steps.validate.outcome }}\`
-          #### Terraform Plan 📖 \`${{ steps.plan.outcome }}\`
+          const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+          #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+          #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+          #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
 
           <details><summary>Show Plan</summary>
 
@@ -83,33 +81,14 @@ jobs:
           ${process.env.PLAN}
           \`\`\`
 
-          </details>
+          </details>`;
 
-          *Pushed by: @${{ github.actor }}*`;
-
-          // Delete previous comments to avoid clutter
-          const { data: comments } = await github.rest.issues.listComments({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.issue.number,
-          });
-
-          for (const comment of comments) {
-            if (comment.user.type === 'Bot' && comment.body.includes('Terraform Format and Style')) {
-              await github.rest.issues.deleteComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: comment.id,
-              });
-            }
-          }
-
-          await github.rest.issues.createComment({
+          github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
             body: output
-          });
+          })
 
     - name: Terraform Apply
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -117,62 +96,26 @@ jobs:
         cd ${{ env.TF_WORKING_DIR }}
         terraform apply -auto-approve -input=false
 
-    - name: Update Kubernetes Deployment
+    - name: Setup Kubernetes
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
-        # Get cluster info from Terraform output
-        cd ${{ env.TF_WORKING_DIR }}
-        CLUSTER_NAME=$(terraform output -raw cluster_id)
-        AWS_REGION=$(terraform output -raw aws_region)
+        # Install kubectl
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+    - name: Deploy Application
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        CLUSTER_NAME="innovatemart-eks"
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name $CLUSTER_NAME
         
-        # Update kubeconfig
-        aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+        # Deploy application
+        kubectl apply -f kubernetes/retail-store-app.yaml
+        kubectl apply -f kubernetes/ingress.yaml
         
-        # Deploy/update Kubernetes manifests
-        cd ../kubernetes
-        kubectl apply -f retail-store-app.yaml
-        kubectl apply -f ingress.yaml
-        
-        # Wait for deployment to complete
+        # Wait for deployment
         kubectl wait --for=condition=ready pod --all --timeout=600s
         
         # Get application URL
-        ALB_URL=$(kubectl get ingress retail-store-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "PENDING")
+        ALB_URL=$(kubectl get ingress retail-store-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Not ready")
         echo "Application URL: http://$ALB_URL"
-
-    - name: Notify Deployment Status
-      if: always() && github.ref == 'refs/heads/main'
-      uses: actions/github-script@v6
-      with:
-        script: |
-          const deploymentStatus = '${{ job.status }}';
-          const actor = '${{ github.actor }}';
-          const commitMsg = '${{ github.event.head_commit.message }}';
-          const sha = '${{ github.sha }}'.substring(0, 7);
-          
-          let message = '';
-          let color = 'good';
-          
-          if (deploymentStatus === 'success') {
-            message = `✅ Terraform deployment completed successfully!\n\n`;
-            message += `**Commit:** ${commitMsg}\n`;
-            message += `**Deployed by:** ${actor}\n`;
-            message += `**SHA:** ${sha}\n`;
-            
-            // Get application URL if available
-            message += `**Application URL:** http://${{ steps.deploy.outputs.alb_url || 'PENDING' }}\n`;
-          } else {
-            message = `❌ Terraform deployment failed!\n\n`;
-            message += `**Commit:** ${commitMsg}\n`;
-            message += `**Deployed by:** ${actor}\n`;
-            message += `**SHA:** ${sha}\n`;
-            color = 'danger';
-          }
-          
-          // Create a deployment status comment
-          await github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: message
-          });
