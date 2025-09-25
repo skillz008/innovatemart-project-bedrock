@@ -11,13 +11,21 @@ env:
   TERRAFORM_VERSION: '1.5.0'
   TF_WORKING_DIR: 'terraform'
 
+# Set permissions at the workflow level
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
 jobs:
   terraform:
     name: 'Terraform'
     runs-on: ubuntu-latest
-    
+
+    # You can also set permissions at the job level (more specific)
     permissions:
       contents: read
+      pull-requests: write
       id-token: write
 
     steps:
@@ -38,29 +46,21 @@ jobs:
 
     - name: Terraform Format
       id: fmt
-      run: |
-        cd ${{ env.TF_WORKING_DIR }}
-        terraform fmt -check -recursive
+      run: terraform -chdir=${{ env.TF_WORKING_DIR }} fmt -check -recursive
       continue-on-error: true
 
     - name: Terraform Init
       id: init
-      run: |
-        cd ${{ env.TF_WORKING_DIR }}
-        terraform init
+      run: terraform -chdir=${{ env.TF_WORKING_DIR }} init
 
     - name: Terraform Validate
       id: validate
-      run: |
-        cd ${{ env.TF_WORKING_DIR }}
-        terraform validate
+      run: terraform -chdir=${{ env.TF_WORKING_DIR }} validate
 
     - name: Terraform Plan
       id: plan
       if: github.event_name == 'pull_request'
-      run: |
-        cd ${{ env.TF_WORKING_DIR }}
-        terraform plan -no-color -input=false
+      run: terraform -chdir=${{ env.TF_WORKING_DIR }} plan -no-color -input=false
       continue-on-error: true
 
     - name: Update Pull Request
@@ -69,6 +69,7 @@ jobs:
       env:
         PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
       with:
+        # Use the GITHUB_TOKEN which now has pull-requests: write permission
         script: |
           const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
           #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
@@ -83,12 +84,17 @@ jobs:
 
           </details>`;
 
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: output
-          })
+          try {
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+          } catch (error) {
+            console.log('Could not create comment. This is expected for PRs from forks.');
+            console.log(error);
+          }
 
     - name: Terraform Apply
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
