@@ -91,6 +91,16 @@ jobs:
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
         cd ${{ env.TF_WORKING_DIR }}
+        
+        # Try to import existing resources if they exist
+        echo "Attempting to import existing resources..."
+        terraform import aws_iam_user.developer innovatemart-developer || echo "IAM user may not exist or already imported"
+        terraform import aws_iam_role.load_balancer_controller AmazonEKSLoadBalancerControllerRole || echo "IAM role may not exist or already imported"
+        
+        # Apply with refresh-only first to sync state
+        terraform apply -refresh-only -auto-approve
+        
+        # Then apply changes
         terraform apply -auto-approve -input=false
 
     - name: Verify AWS Authentication
