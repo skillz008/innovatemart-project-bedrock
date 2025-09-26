@@ -2,17 +2,17 @@ name: Fix ALB Issues
 
 on:
   workflow_dispatch:  # Manual trigger only
-  inputs:
-    fix-type:
-      description: 'Type of fix to apply'
-      required: true
-      default: 'reinstall-controller'
-      type: choice
-      options:
-      - reinstall-controller
-      - update-ingress
-      - manual-alb
-      - check-permissions
+    inputs:
+      fix-type:
+        description: 'Type of fix to apply'
+        required: true
+        default: 'reinstall-controller'
+        type: choice
+        options:
+          - reinstall-controller
+          - update-ingress
+          - manual-alb
+          - check-permissions
 
 jobs:
   fix-alb:
@@ -47,7 +47,7 @@ jobs:
         aws eks update-kubeconfig --region us-east-1 --name innovatemart-eks
 
     - name: Apply Fix - Reinstall Controller
-      if: inputs.fix-type == 'reinstall-controller'
+      if: ${{ github.event.inputs.fix-type == 'reinstall-controller' }}
       run: |
         echo "Reinstalling AWS Load Balancer Controller..."
         
@@ -67,46 +67,46 @@ jobs:
         kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=aws-load-balancer-controller -n kube-system --timeout=300s
 
     - name: Apply Fix - Update Ingress
-      if: inputs.fix-type == 'update-ingress'
+      if: ${{ github.event.inputs.fix-type == 'update-ingress' }}
       run: |
         echo "Updating Ingress configuration..."
         
         # Create fixed ingress
         cat > ingress-fixed.yaml << 'EOF'
-        apiVersion: networking.k8s.io/v1
-        kind: Ingress
-        metadata:
-          name: retail-store-ingress
-          namespace: default
-          annotations:
-            kubernetes.io/ingress.class: alb
-            alb.ingress.kubernetes.io/scheme: internet-facing
-            alb.ingress.kubernetes.io/target-type: ip
-            alb.ingress.kubernetes.io/healthcheck-path: /
-            alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
-            alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
-            alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
-            alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
-            alb.ingress.kubernetes.io/success-codes: "200"
-        spec:
-          rules:
-            - http:
-                paths:
-                  - path: /
-                    pathType: Prefix
-                    backend:
-                      service:
-                        name: ui
-                        port:
-                          number: 80
-        EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: retail-store-ingress
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/success-codes: "200"
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ui
+                port:
+                  number: 80
+EOF
         
         # Apply the fixed ingress
         kubectl apply -f ingress-fixed.yaml
         echo "Ingress updated successfully"
 
     - name: Apply Fix - Manual ALB Creation
-      if: inputs.fix-type == 'manual-alb'
+      if: ${{ github.event.inputs.fix-type == 'manual-alb' }}
       run: |
         echo "Creating ALB manually..."
         
@@ -154,7 +154,7 @@ jobs:
         echo "Application URL: http://$ALB_DNS"
 
     - name: Apply Fix - Check Permissions
-      if: inputs.fix-type == 'check-permissions'
+      if: ${{ github.event.inputs.fix-type == 'check-permissions' }}
       run: |
         echo "Checking IAM permissions..."
         
@@ -175,12 +175,15 @@ jobs:
         sleep 30
         
         # Check ingress status
+        echo "=== Ingress Status ==="
         kubectl get ingress retail-store-ingress -o wide
         
         # Check services
+        echo "=== Service Status ==="
         kubectl get service ui -o wide
         
         # Check AWS load balancers
+        echo "=== AWS Load Balancers ==="
         aws elbv2 describe-load-balancers --region us-east-1 --query 'LoadBalancers[*].{Name:LoadBalancerName,DNSName:DNSName,State:State.Code}' --output table
 
     - name: Upload Fix Results
