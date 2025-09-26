@@ -1,11 +1,27 @@
 #!/bin/bash
+
 set -e
 
 echo "Starting Project Bedrock deployment..."
 
+# Clean up any previous failed deployments
+echo "Cleaning up previous deployments..."
+cd terraform
+terraform destroy -auto-approve || true
+
+# Wait for resources to be cleaned up
+sleep 30
+
 # Initialize and deploy infrastructure
 echo "Deploying infrastructure with Terraform..."
-cd infrastructure
+terraform init -upgrade
+
+# Validate configuration
+terraform validate
+
+# Plan and apply
+terraform plan -out=plan.out
+terraform apply -auto-approve
 
 # Get EKS cluster info
 CLUSTER_NAME=$(terraform output -raw cluster_id 2>/dev/null || echo "innovatemart-eks")
