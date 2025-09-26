@@ -37,6 +37,16 @@ jobs:
       with:
         terraform_version: ${{ env.TERRAFORM_VERSION }}
 
+    - name: Setup Kubernetes tools
+      run: |
+        # Install kubectl
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+        
+        # Install Helm
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
     - name: Terraform Format
       id: fmt
       run: terraform -chdir=${{ env.TF_WORKING_DIR }} fmt -check -recursive
@@ -84,83 +94,20 @@ jobs:
               body: output
             });
           } catch (error) {
-            console.log('Could not create comment.');
+            console.log('Could not create comment. This is expected for PRs from forks.');
           }
 
-    - name: Terraform Apply
+    - name: Full Deployment (Infrastructure + Application)
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
-        cd ${{ env.TF_WORKING_DIR }}
-        
-        # Try to import existing resources if they exist
-        echo "Attempting to import existing resources..."
-        terraform import aws_iam_user.developer innovatemart-developer || echo "IAM user may not exist or already imported"
-        terraform import aws_iam_role.load_balancer_controller AmazonEKSLoadBalancerControllerRole || echo "IAM role may not exist or already imported"
-        
-        # Apply with refresh-only first to sync state
-        terraform apply -refresh-only -auto-approve
-        
-        # Then apply changes
-        terraform apply -auto-approve -input=false
+        chmod +x scripts/deploy.sh
+        ./scripts/deploy.sh
 
-    - name: Verify AWS Authentication
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      run: |
-        echo "Verifying AWS credentials..."
-        aws sts get-caller-identity
-        aws eks list-clusters --region ${{ env.AWS_REGION }}
-
-    - name: Setup EKS Access
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      run: |
-        # Install kubectl
-        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        chmod +x kubectl
-        sudo mv kubectl /usr/local/bin/
-        
-        # Get cluster info
-        cd ${{ env.TF_WORKING_DIR }}
-        CLUSTER_NAME=$(terraform output -raw cluster_id)
-        echo "Setting up access to cluster: $CLUSTER_NAME"
-        
-        # Update kubeconfig with retry logic
-        for i in {1..5}; do
-          if aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name $CLUSTER_NAME; then
-            echo "Kubeconfig updated successfully"
-            break
-          else
-            echo "Attempt $i failed, retrying in 10 seconds..."
-            sleep 10
-          fi
-        done
-        
-        # Verify cluster access
-        echo "Verifying cluster access..."
-        kubectl cluster-info
-        kubectl get nodes
-
-    - name: Deploy Application
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      run: |
-        echo "Starting application deployment..."
-        
-        # Apply with validation
-        kubectl apply -f kubernetes/retail-store-app.yaml
-        kubectl apply -f kubernetes/ingress.yaml
-        
-        # Wait for deployment with progress indication
-        echo "Waiting for all pods to be ready..."
-        for i in {1..30}; do
-          if kubectl wait --for=condition=ready pod --all --timeout=60s 2>/dev/null; then
-            echo "All pods are ready!"
-            break
-          else
-            echo "Waiting for pods... ($i/30)"
-            sleep 10
-          fi
-        done
-        
-        # Get application info
-        ALB_URL=$(kubectl get ingress retail-store-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Check AWS console for ALB")
-        echo "🎉 Application deployed successfully!"
-        echo "🌐 Access your application at: http://$ALB_URL"
+    - name: Upload Deployment Logs
+      if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-logs
+        path: |
+          deployment.log
+        retention-days: 1
