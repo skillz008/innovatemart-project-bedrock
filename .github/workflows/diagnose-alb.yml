@@ -1,0 +1,89 @@
+name: Diagnose ALB Issues
+
+on:
+  workflow_dispatch:  # Allows manual triggering
+  push:
+    branches: [ main ]
+
+jobs:
+  diagnose:
+    name: Diagnose ALB Configuration
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Setup Kubernetes tools
+      run: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+
+    - name: Configure EKS access
+      run: |
+        aws eks update-kubeconfig --region us-east-1 --name innovatemart-eks
+
+    - name: Run ALB Diagnostics
+      run: |
+        echo "=== ALB DIAGNOSTICS REPORT ==="
+        echo ""
+        
+        echo "1. Checking Load Balancer Controller Pods:"
+        kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+        echo ""
+        
+        echo "2. Load Balancer Controller Logs:"
+        kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=100 || echo "No logs available"
+        echo ""
+        
+        echo "3. Checking Ingress Resource:"
+        kubectl get ingress retail-store-ingress -o wide
+        echo ""
+        
+        echo "4. Ingress Details:"
+        kubectl describe ingress retail-store-ingress || echo "Ingress not found"
+        echo ""
+        
+        echo "5. Checking UI Service:"
+        kubectl get service ui -o wide
+        echo ""
+        
+        echo "6. Service Details:"
+        kubectl describe service ui || echo "UI service not found"
+        echo ""
+        
+        echo "7. Checking Pods Status:"
+        kubectl get pods -o wide
+        echo ""
+        
+        echo "8. Recent Events:"
+        kubectl get events --sort-by='.lastTimestamp' --tail=20
+        echo ""
+        
+        echo "9. Checking AWS Load Balancers:"
+        aws elbv2 describe-load-balancers --region us-east-1 --query 'LoadBalancers[*].{Name:LoadBalancerName,DNSName:DNSName,State:State.Code}' --output table || echo "Unable to list load balancers"
+        echo ""
+        
+        echo "10. Checking AWS Target Groups:"
+        aws elbv2 describe-target-groups --region us-east-1 --query 'TargetGroups[*].{Name:TargetGroupName,Protocol:Protocol,Port:Port}' --output table || echo "Unable to list target groups"
+        echo ""
+
+    - name: Upload Diagnostics Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: alb-diagnostics
+        path: |
+          diagnostics.log
+        retention-days: 1
