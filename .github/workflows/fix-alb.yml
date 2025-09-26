@@ -1,0 +1,192 @@
+name: Fix ALB Issues
+
+on:
+  workflow_dispatch:  # Manual trigger only
+  inputs:
+    fix-type:
+      description: 'Type of fix to apply'
+      required: true
+      default: 'reinstall-controller'
+      type: choice
+      options:
+      - reinstall-controller
+      - update-ingress
+      - manual-alb
+      - check-permissions
+
+jobs:
+  fix-alb:
+    name: Apply ALB Fix
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Setup Kubernetes and Helm
+      run: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+        
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+    - name: Configure EKS access
+      run: |
+        aws eks update-kubeconfig --region us-east-1 --name innovatemart-eks
+
+    - name: Apply Fix - Reinstall Controller
+      if: inputs.fix-type == 'reinstall-controller'
+      run: |
+        echo "Reinstalling AWS Load Balancer Controller..."
+        
+        # Uninstall current controller
+        helm uninstall aws-load-balancer-controller -n kube-system --ignore-not-found=true
+        
+        # Reinstall
+        helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+          -n kube-system \
+          --set clusterName=innovatemart-eks \
+          --set serviceAccount.create=true \
+          --set region=us-east-1 \
+          --set vpcId=vpc-04c1872873ccc4560
+        
+        echo "Controller reinstalled. Waiting for pods..."
+        sleep 30
+        kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=aws-load-balancer-controller -n kube-system --timeout=300s
+
+    - name: Apply Fix - Update Ingress
+      if: inputs.fix-type == 'update-ingress'
+      run: |
+        echo "Updating Ingress configuration..."
+        
+        # Create fixed ingress
+        cat > ingress-fixed.yaml << 'EOF'
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: retail-store-ingress
+          namespace: default
+          annotations:
+            kubernetes.io/ingress.class: alb
+            alb.ingress.kubernetes.io/scheme: internet-facing
+            alb.ingress.kubernetes.io/target-type: ip
+            alb.ingress.kubernetes.io/healthcheck-path: /
+            alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+            alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+            alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+            alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+            alb.ingress.kubernetes.io/success-codes: "200"
+        spec:
+          rules:
+            - http:
+                paths:
+                  - path: /
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: ui
+                        port:
+                          number: 80
+        EOF
+        
+        # Apply the fixed ingress
+        kubectl apply -f ingress-fixed.yaml
+        echo "Ingress updated successfully"
+
+    - name: Apply Fix - Manual ALB Creation
+      if: inputs.fix-type == 'manual-alb'
+      run: |
+        echo "Creating ALB manually..."
+        
+        # Get VPC ID and subnets
+        VPC_ID="vpc-04c1872873ccc4560"
+        SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=*public*" --query 'Subnets[*].SubnetId' --output text | tr '\t' ',')
+        
+        echo "Using VPC: $VPC_ID"
+        echo "Using subnets: $SUBNETS"
+        
+        # Create target group
+        TG_ARN=$(aws elbv2 create-target-group \
+          --name retail-store-ui-tg \
+          --protocol HTTP \
+          --port 80 \
+          --vpc-id $VPC_ID \
+          --health-check-path / \
+          --target-type ip \
+          --query 'TargetGroups[0].TargetGroupArn' \
+          --output text)
+        
+        echo "Target group created: $TG_ARN"
+        
+        # Create load balancer
+        ALB_ARN=$(aws elbv2 create-load-balancer \
+          --name retail-store-alb \
+          --subnets $(echo $SUBNETS | tr ',' ' ') \
+          --scheme internet-facing \
+          --type application \
+          --query 'LoadBalancers[0].LoadBalancerArn' \
+          --output text)
+        
+        echo "Load balancer created: $ALB_ARN"
+        
+        # Create listener
+        aws elbv2 create-listener \
+          --load-balancer-arn $ALB_ARN \
+          --protocol HTTP \
+          --port 80 \
+          --default-actions Type=forward,TargetGroupArn=$TG_ARN
+        
+        # Get DNS name
+        ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns $ALB_ARN --query 'LoadBalancers[0].DNSName' --output text)
+        echo "🎉 ALB DNS Name: $ALB_DNS"
+        echo "Application URL: http://$ALB_DNS"
+
+    - name: Apply Fix - Check Permissions
+      if: inputs.fix-type == 'check-permissions'
+      run: |
+        echo "Checking IAM permissions..."
+        
+        # Check if we can describe load balancers
+        aws elbv2 describe-load-balancers --region us-east-1 --max-items 1
+        
+        # Check EKS access
+        aws eks describe-cluster --name innovatemart-eks --region us-east-1 --query 'cluster.status'
+        
+        # Check EC2 permissions
+        aws ec2 describe-vpcs --vpc-ids vpc-04c1872873ccc4560 --query 'Vpcs[0].VpcId'
+        
+        echo "Basic permissions check completed"
+
+    - name: Verify Fix
+      run: |
+        echo "Verifying the fix..."
+        sleep 30
+        
+        # Check ingress status
+        kubectl get ingress retail-store-ingress -o wide
+        
+        # Check services
+        kubectl get service ui -o wide
+        
+        # Check AWS load balancers
+        aws elbv2 describe-load-balancers --region us-east-1 --query 'LoadBalancers[*].{Name:LoadBalancerName,DNSName:DNSName,State:State.Code}' --output table
+
+    - name: Upload Fix Results
+      uses: actions/upload-artifact@v4
+      with:
+        name: alb-fix-results
+        path: |
+          fix-results.log
+        retention-days: 1
