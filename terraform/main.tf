@@ -5,14 +5,6 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
-    kubernetes = {
-      source  = "hashicorp/kubernetes"
-      version = "~> 2.23"
-    }
-    helm = {
-      source  = "hashicorp/helm"
-      version = "~> 2.11"
-    }
   }
 }
 
@@ -20,7 +12,7 @@ provider "aws" {
   region = var.aws_region
 }
 
-# VPC Module with NAT Gateway configuration to avoid EIP limits
+# VPC Module
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
@@ -32,11 +24,8 @@ module "vpc" {
   private_subnets = var.private_subnets
   public_subnets  = var.public_subnets
 
-  # Use only ONE NAT Gateway to conserve EIPs
-  enable_nat_gateway     = true
-  single_nat_gateway     = true  # Critical fix: Use single NAT Gateway
-  one_nat_gateway_per_az = false # Disable per-AZ NAT gateways
-  
+  enable_nat_gateway   = true
+  single_nat_gateway   = true
   enable_vpn_gateway   = false
   enable_dns_hostnames = true
 
@@ -46,7 +35,7 @@ module "vpc" {
   }
 }
 
-# EKS Cluster with enhanced configuration
+# EKS Cluster
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.0"
@@ -58,81 +47,19 @@ module "eks" {
   subnet_ids = module.vpc.private_subnets
 
   cluster_endpoint_public_access = true
-  cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"] # Allow from anywhere
 
-  # Enable IRSA for better security
-  enable_irsa = true
-
-  # Add cluster security group rules for node communication
-  cluster_security_group_additional_rules = {
-    ingress_nodes_ephemeral_ports_tcp = {
-      description                = "Nodes on ephemeral ports"
-      protocol                   = "tcp"
-      from_port                  = 1025
-      to_port                    = 65535
-      type                       = "ingress"
-      source_node_security_group = true
-    }
-  }
-
-  # Enhanced node group configuration
   eks_managed_node_groups = {
     main = {
-      name            = "main"
-      min_size        = 1
-      max_size        = 3
-      desired_size    = 2
-      instance_types  = ["t3.medium"]
-      capacity_type   = "ON_DEMAND"
+      name           = "main"
+      min_size       = 1
+      max_size       = 3
+      desired_size   = 2
+      instance_types = ["t3.medium"]
+      capacity_type  = "ON_DEMAND"
 
-      # Use launch template for better control
-      use_custom_launch_template = false
-
-      # Disk size
-      disk_size = 20
-
-      # Updated IAM role configuration
       iam_role_additional_policies = {
         AmazonEC2ContainerRegistryReadOnly = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-        AmazonEKS_CNI_Policy               = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-        AmazonEKSWorkerNodePolicy          = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
       }
-
-      # Update configuration to prevent node join issues
-      update_config = {
-        max_unavailable_percentage = 50
-      }
-
-      # Taints and labels
-      labels = {
-        role = "general"
-      }
-
-      tags = {
-        Environment = "production"
-        Project     = "project-bedrock"
-      }
-    }
-  }
-
-  # Node security group additional rules
-  node_security_group_additional_rules = {
-    ingress_self_all = {
-      description = "Node to node all ports/protocols"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 0
-      type        = "ingress"
-      self        = true
-    }
-    egress_all = {
-      description      = "Node all egress"
-      protocol         = "-1"
-      from_port        = 0
-      to_port          = 0
-      type             = "egress"
-      cidr_blocks      = ["0.0.0.0/0"]
-      ipv6_cidr_blocks = ["::/0"]
     }
   }
 
@@ -142,46 +69,15 @@ module "eks" {
   }
 }
 
-# IAM Role for Load Balancer Controller (IRSA)
-resource "aws_iam_role" "load_balancer_controller" {
-  name = "aws-load-balancer-controller"
-
-  assume_role_policy = jsonencode({
-    Statement = [{
-      Action = "sts:AssumeRoleWithWebIdentity"
-      Effect = "Allow"
-      Principal = {
-        Federated = module.eks.oidc_provider_arn
-      }
-      Condition = {
-        StringEquals = {
-          "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
-          "${module.eks.oidc_provider}:aud" = "sts.amazonaws.com"
-        }
-      }
-    }]
-    Version = "2012-10-17"
-  })
-}
-
-# Load Balancer Controller IAM Policy
-resource "aws_iam_policy" "load_balancer_controller" {
-  name        = "AWSLoadBalancerController"
-  description = "Policy for AWS Load Balancer Controller"
-
-  policy = file("${path.module}/iam-policies/load-balancer-controller.json")
-}
-
-# Attach policy to role
-resource "aws_iam_role_policy_attachment" "load_balancer_controller" {
-  policy_arn = aws_iam_policy.load_balancer_controller.arn
-  role       = aws_iam_role.load_balancer_controller.name
-}
-
 # IAM User for Developers
 resource "aws_iam_user" "developer" {
   name = "innovatemart-developer"
   path = "/developers/"
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes = [name]
+  }
 }
 
 resource "aws_iam_user_policy" "developer_readonly" {
@@ -206,30 +102,85 @@ resource "aws_iam_user_policy" "developer_readonly" {
         Effect = "Allow"
         Action = [
           "ec2:DescribeInstances",
-          "ec2:DescribeRegions",
-          "ec2:DescribeSecurityGroups",
-          "ec2:DescribeSubnets",
-          "ec2:DescribeVpcs"
+          "ec2:DescribeRegions"
         ]
         Resource = "*"
       }
     ]
   })
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_iam_access_key" "developer" {
   user = aws_iam_user.developer.name
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# IAM Role for Load Balancer Controller
+resource "aws_iam_role" "load_balancer_controller" {
+  name = "AmazonEKSLoadBalancerControllerRole"
+
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Effect = "Allow"
+      Principal = {
+        Federated = module.eks.oidc_provider_arn
+      }
+      Condition = {
+        StringEquals = {
+          "${module.eks.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+          "${module.eks.oidc_provider}:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+    Version = "2012-10-17"
+  })
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes = [name]
+  }
+}
+
+# Load Balancer Controller IAM Policy
+resource "aws_iam_policy" "load_balancer_controller" {
+  name        = "AWSLoadBalancerControllerIAMPolicy"
+  description = "Policy for AWS Load Balancer Controller"
+
+  policy = file("${path.module}/iam-policies/load-balancer-controller.json")
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes = [name]
+  }
+}
+
+# Attach policy to role
+resource "aws_iam_role_policy_attachment" "load_balancer_controller" {
+  policy_arn = aws_iam_policy.load_balancer_controller.arn
+  role       = aws_iam_role.load_balancer_controller.name
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # Outputs
+output "cluster_id" {
+  description = "EKS cluster ID"
+  value       = module.eks.cluster_name
+}
+
 output "cluster_endpoint" {
   description = "EKS cluster endpoint"
   value       = module.eks.cluster_endpoint
-}
-
-output "cluster_certificate_authority_data" {
-  description = "EKS cluster CA certificate"
-  value       = module.eks.cluster_certificate_authority_data
 }
 
 output "vpc_id" {
@@ -237,60 +188,12 @@ output "vpc_id" {
   value       = module.vpc.vpc_id
 }
 
-output "developer_access_key" {
-  description = "Developer IAM access key"
-  value       = aws_iam_access_key.developer.id
-  sensitive   = true
-}
-
-output "developer_secret_key" {
-  description = "Developer IAM secret key"
-  value       = aws_iam_access_key.developer.secret
-  sensitive   = true
-}
-
-output "cluster_oidc_provider_arn" {
-  description = "OIDC provider ARN for IRSA"
-  value       = module.eks.oidc_provider_arn
-}
-
-output "load_balancer_controller_role_arn" {
-  description = "Load Balancer Controller IAM Role ARN"
-  value       = aws_iam_role.load_balancer_controller.arn
-}
-
 output "aws_region" {
   description = "AWS region"
   value       = var.aws_region
 }
 
-# IAM policy for Load Balancer Controller (if using node group role)
-resource "aws_iam_role_policy_attachment" "alb_controller" {
-  count = var.enable_alb_controller ? 1 : 0
-
-  policy_arn = aws_iam_policy.alb_controller[0].arn
-  role       = module.eks.eks_managed_node_groups.main.iam_role_name
-}
-
-resource "aws_iam_policy" "alb_controller" {
-  count = var.enable_alb_controller ? 1 : 0
-
-  name        = "ALBControllerPolicy"
-  description = "Policy for AWS Load Balancer Controller"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "ec2:Describe*",
-          "elasticloadbalancing:*",
-          "acm:ListCertificates",
-          "acm:DescribeCertificate"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
+output "load_balancer_controller_role_arn" {
+  description = "Load Balancer Controller IAM Role ARN"
+  value       = aws_iam_role.load_balancer_controller.arn
 }
