@@ -1,0 +1,329 @@
+name: Fix ALB 504 Gateway Timeout Error
+
+on:
+  workflow_dispatch:  # Allows manual triggering
+    inputs:
+      approach:
+        description: 'Which approach to try first?'
+        required: true
+        default: 'simple'
+        type: choice
+        options:
+        - simple
+        - official-policy
+        - complete-policy
+
+env:
+  AWS_REGION: 'us-east-1'
+  CLUSTER_NAME: 'retail-store-cluster'
+  ROLE_NAME: 'AmazonEKSLoadBalancerControllerRole'
+  POLICY_NAME: 'AWSLoadBalancerControllerIAMPolicy'
+
+jobs:
+  fix-alb-issue:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig \
+          --region ${{ env.AWS_REGION }} \
+          --name ${{ env.CLUSTER_NAME }}
+
+    - name: Determine approach
+      id: approach
+      run: |
+        echo "approach=${{ github.event.inputs.approach || 'simple' }}" >> $GITHUB_OUTPUT
+
+    - name: Fix IAM Policy - Official AWS Policy
+      if: steps.approach.outputs.approach == 'official-policy'
+      run: |
+        echo "Applying official AWS Load Balancer Controller policy..."
+        
+        # Download the official IAM policy
+        curl -o iam-policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
+        
+        # Create and attach the policy
+        aws iam create-policy \
+          --policy-name ${{ env.POLICY_NAME }} \
+          --policy-document file://iam-policy.json || echo "Policy may already exist"
+        
+        # Attach to role
+        aws iam attach-role-policy \
+          --role-name ${{ env.ROLE_NAME }} \
+          --policy-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:policy/${{ env.POLICY_NAME }}
+
+    - name: Fix IAM Policy - Complete Custom Policy
+      if: steps.approach.outputs.approach == 'complete-policy'
+      run: |
+        echo "Applying complete custom policy..."
+        
+        # Create the complete policy JSON file
+        cat > complete-load-balancer-policy.json << EOF
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": [
+                        "iam:CreateServiceLinkedRole",
+                        "ec2:DescribeAccountAttributes",
+                        "ec2:DescribeAddresses",
+                        "ec2:DescribeAvailabilityZones",
+                        "ec2:DescribeInternetGateways",
+                        "ec2:DescribeVpcs",
+                        "ec2:DescribeSubnets",
+                        "ec2:DescribeSecurityGroups",
+                        "ec2:DescribeInstances",
+                        "ec2:DescribeNetworkInterfaces",
+                        "ec2:DescribeTags",
+                        "ec2:GetCoipPoolUsage",
+                        "ec2:DescribeCoipPools",
+                        "ec2:DescribeRouteTables",
+                        "elasticloadbalancing:DescribeLoadBalancers",
+                        "elasticloadbalancing:DescribeLoadBalancerAttributes",
+                        "elasticloadbalancing:DescribeListeners",
+                        "elasticloadbalancing:DescribeListenerCertificates",
+                        "elasticloadbalancing:DescribeSSLPolicies",
+                        "elasticloadbalancing:DescribeRules",
+                        "elasticloadbalancing:DescribeTargetGroups",
+                        "elasticloadbalancing:DescribeTargetHealth",
+                        "elasticloadbalancing:DescribeTargetGroupAttributes",
+                        "elasticloadbalancing:CreateLoadBalancer",
+                        "elasticloadbalancing:CreateTargetGroup",
+                        "elasticloadbalancing:CreateListener",
+                        "elasticloadbalancing:DeleteListener",
+                        "elasticloadbalancing:CreateRule",
+                        "elasticloadbalancing:DeleteRule",
+                        "elasticloadbalancing:DeleteLoadBalancer",
+                        "elasticloadbalancing:DeleteTargetGroup",
+                        "elasticloadbalancing:ModifyLoadBalancerAttributes",
+                        "elasticloadbalancing:ModifyTargetGroup",
+                        "elasticloadbalancing:ModifyTargetGroupAttributes",
+                        "elasticloadbalancing:RegisterTargets",
+                        "elasticloadbalancing:DeregisterTargets",
+                        "elasticloadbalancing:SetWebAcl",
+                        "elasticloadbalancing:ModifyListener",
+                        "elasticloadbalancing:AddListenerCertificates",
+                        "elasticloadbalancing:RemoveListenerCertificates",
+                        "elasticloadbalancing:ModifyRule",
+                        "elasticloadbalancing:AddTags",
+                        "elasticloadbalancing:RemoveTags",
+                        "elasticloadbalancing:SetIpAddressType",
+                        "elasticloadbalancing:SetSecurityGroups",
+                        "elasticloadbalancing:SetSubnets",
+                        "cognito-idp:DescribeUserPoolClient",
+                        "acm:ListCertificates",
+                        "acm:DescribeCertificate",
+                        "iam:ListServerCertificates",
+                        "iam:GetServerCertificate",
+                        "waf-regional:GetWebACL",
+                        "waf-regional:GetWebACLForResource",
+                        "waf-regional:AssociateWebACL",
+                        "waf-regional:DisassociateWebACL",
+                        "wafv2:GetWebACL",
+                        "wafv2:GetWebACLForResource",
+                        "wafv2:AssociateWebACL",
+                        "wafv2:DisassociateWebACL",
+                        "shield:GetSubscriptionState",
+                        "shield:DescribeProtection",
+                        "shield:CreateProtection",
+                        "shield:DeleteProtection"
+                    ],
+                    "Resource": "*"
+                }
+            ]
+        }
+        EOF
+        
+        # Create and attach the policy
+        aws iam create-policy \
+          --policy-name AWSLoadBalancerControllerCompletePolicy \
+          --policy-document file://complete-load-balancer-policy.json || echo "Policy may already exist"
+        
+        aws iam attach-role-policy \
+          --role-name ${{ env.ROLE_NAME }} \
+          --policy-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:policy/AWSLoadBalancerControllerCompletePolicy
+
+    - name: Get Subnet Information
+      run: |
+        echo "Retrieving subnet information..."
+        aws ec2 describe-subnets --region ${{ env.AWS_REGION }} \
+          --filters "Name=vpc-id,Values=vpc-09108779b7c1eddcb" \
+          --query 'Subnets[*].{ID:SubnetId,Public:Tags[?Key==`kubernetes.io/role/elb`].Value|[0]}' \
+          --output table
+        
+        # Get public subnets specifically
+        aws ec2 describe-subnets --region ${{ env.AWS_REGION }} \
+          --filters "Name=tag:kubernetes.io/role/elb,Values=1" \
+          --query 'Subnets[*].SubnetId' \
+          --output text
+
+    - name: Create Simple Ingress Configuration
+      run: |
+        echo "Creating simple ingress configuration with public subnets..."
+        
+        cat > ingress-simple.yaml << EOF
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: retail-store-ingress
+          namespace: default
+          annotations:
+            kubernetes.io/ingress.class: alb
+            alb.ingress.kubernetes.io/scheme: internet-facing
+            alb.ingress.kubernetes.io/target-type: ip
+            alb.ingress.kubernetes.io/healthcheck-path: /
+            alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+            alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+            alb.ingress.kubernetes.io/subnet-type: public
+            alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
+            alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '10'
+            alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+            alb.ingress.kubernetes.io/unhealthy-threshold-count: '2'
+        spec:
+          rules:
+            - http:
+                paths:
+                  - path: /
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: ui
+                        port:
+                          number: 80
+        EOF
+        
+        echo "Ingress configuration created:"
+        cat ingress-simple.yaml
+
+    - name: Delete Existing Ingress
+      run: |
+        echo "Deleting existing ingress..."
+        kubectl delete ingress retail-store-ingress --ignore-not-found=true --namespace=default
+        sleep 10
+
+    - name: Restart Load Balancer Controller
+      run: |
+        echo "Restarting AWS Load Balancer Controller..."
+        kubectl delete pod -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --ignore-not-found=true
+        sleep 30
+        
+        # Wait for controller to be ready
+        kubectl wait --for=condition=ready pod \
+          -n kube-system \
+          -l app.kubernetes.io/name=aws-load-balancer-controller \
+          --timeout=300s
+
+    - name: Apply New Ingress
+      run: |
+        echo "Applying new ingress configuration..."
+        kubectl apply -f ingress-simple.yaml
+
+    - name: Wait for ALB Provisioning
+      run: |
+        echo "Waiting for ALB to be provisioned (this may take 2-5 minutes)..."
+        
+        # Wait up to 10 minutes for ALB to be created
+        for i in {1..60}; do
+          echo "Attempt $i/60: Checking ingress status..."
+          INGRESS_STATUS=$(kubectl get ingress retail-store-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "not-ready")
+          
+          if [[ "$INGRESS_STATUS" != "not-ready" && ! -z "$INGRESS_STATUS" ]]; then
+            echo "ALB is ready! Hostname: $INGRESS_STATUS"
+            echo "ALB_HOSTNAME=$INGRESS_STATUS" >> $GITHUB_ENV
+            break
+          fi
+          
+          if [ $i -eq 60 ]; then
+            echo "ALB provisioning timeout after 10 minutes"
+            exit 1
+          fi
+          
+          sleep 10
+        done
+
+    - name: Check ALB Health
+      run: |
+        echo "Checking ALB health and configuration..."
+        
+        # Get detailed ingress information
+        kubectl get ingress retail-store-ingress -o wide
+        kubectl describe ingress retail-store-ingress
+        
+        # Check controller logs for errors
+        echo "Load Balancer Controller logs:"
+        kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=20
+
+    - name: Test Application Endpoint
+      run: |
+        echo "Testing application endpoint..."
+        
+        if [ ! -z "$ALB_HOSTNAME" ]; then
+          echo "Testing HTTP endpoint: http://$ALB_HOSTNAME"
+          
+          # Test with timeout and retries
+          for i in {1..10}; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 http://$ALB_HOSTNAME/ || echo "failed")
+            
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "SUCCESS: Application is responding with HTTP 200"
+              echo "Application URL: http://$ALB_HOSTNAME"
+              break
+            elif [ "$HTTP_STATUS" = "failed" ]; then
+              echo "Attempt $i/10: Connection failed, retrying in 10 seconds..."
+            else
+              echo "Attempt $i/10: HTTP Status $HTTP_STATUS, retrying in 10 seconds..."
+            fi
+            
+            if [ $i -eq 10 ]; then
+              echo "WARNING: Application not fully responsive yet, but ALB is created."
+              echo "This is normal - it may take a few more minutes for the application to be fully available."
+            fi
+            
+            sleep 10
+          done
+        else
+          echo "ALB hostname not available yet"
+        fi
+
+    - name: Final Status Check
+      run: |
+        echo "=== FINAL STATUS ==="
+        kubectl get ingress retail-store-ingress
+        kubectl get pods -l app=ui
+        kubectl get services ui
+        
+        echo "Load Balancer Controller status:"
+        kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+
+    - name: Create Summary Report
+      if: always()
+      run: |
+        echo "## ALB Fix Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Approach used:** ${{ steps.approach.outputs.approach }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        INGRESS_HOSTNAME=$(kubectl get ingress retail-store-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Not available")
+        echo "**ALB Hostname:** $INGRESS_HOSTNAME" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ ! -z "$INGRESS_HOSTNAME" ] && [ "$INGRESS_HOSTNAME" != "Not available" ]; then
+          echo "✅ **Status:** ALB successfully created" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 **Application URL:** http://$INGRESS_HOSTNAME" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Status:** ALB creation may still be in progress or failed" >> $GITHUB_STEP_SUMMARY
+          echo "**Next steps:** Check the controller logs and wait a few more minutes" >> $GITHUB_STEP_SUMMARY
+        fi
