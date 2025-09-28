@@ -1,0 +1,117 @@
+name: Recreate EKS Cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: "Type 'DESTROY AND RECREATE' to confirm"
+        required: true
+        default: "NO"
+
+env:
+  AWS_REGION: 'us-east-1'
+  CLUSTER_NAME: 'innovatemart-eks'
+  NAMESPACE: 'default'
+
+jobs:
+  recreate-cluster:
+    if: github.event.inputs.confirm_destroy == 'DESTROY AND RECREATE'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Delete EKS Cluster
+      run: |
+        echo "Deleting EKS cluster: ${{ env.CLUSTER_NAME }}"
+        aws eks delete-cluster \
+          --name ${{ env.CLUSTER_NAME }} \
+          --region ${{ env.AWS_REGION }}
+        
+        echo "Waiting for cluster deletion..."
+        aws eks wait cluster-deleted \
+          --name ${{ env.CLUSTER_NAME }} \
+          --region ${{ env.AWS_REGION }}
+        
+        echo "Cluster deleted successfully"
+
+    - name: Wait before recreation
+      run: |
+        echo "Waiting 2 minutes before recreating cluster..."
+        sleep 120
+
+    - name: Create New EKS Cluster
+      run: |
+        echo "Creating new EKS cluster: ${{ env.CLUSTER_NAME }}"
+        
+        # Create cluster with proper configuration
+        aws eks create-cluster \
+          --name ${{ env.CLUSTER_NAME }} \
+          --region ${{ env.AWS_REGION }} \
+          --kubernetes-version 1.28 \
+          --role-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/eks-service-role \
+          --resources-vpc-config subnetIds=subnet-0abf3d6c6d6d4a6b7,subnet-0ec8e6a5a5a5a5a5c
+        
+        echo "Waiting for cluster to be active..."
+        aws eks wait cluster-active \
+          --name ${{ env.CLUSTER_NAME }} \
+          --region ${{ env.AWS_REGION }}
+        
+        echo "Cluster created successfully"
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig \
+          --region ${{ env.AWS_REGION }} \
+          --name ${{ env.CLUSTER_NAME }}
+
+    - name: Install ALB Controller
+      run: |
+        echo "Installing AWS Load Balancer Controller..."
+        
+        # Create IAM role for ALB controller
+        eksctl create iamserviceaccount \
+          --cluster=${{ env.CLUSTER_NAME }} \
+          --namespace=kube-system \
+          --name=aws-load-balancer-controller \
+          --attach-policy-arn=arn:aws:iam::aws:policy/AWSLoadBalancerControllerIAMPolicy \
+          --override-existing-serviceaccounts \
+          --approve
+        
+        # Install ALB controller
+        helm repo add eks https://aws.github.io/eks-charts
+        helm repo update
+        
+        helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+          -n kube-system \
+          --set clusterName=${{ env.CLUSTER_NAME }} \
+          --set serviceAccount.create=false \
+          --set serviceAccount.name=aws-load-balancer-controller
+
+    - name: Deploy Retail Store Application
+      run: |
+        echo "Deploying retail store application..."
+        
+        # Apply the complete application manifest
+        kubectl apply -f - <<EOF
+        # [Paste your complete retail store manifest here]
+        EOF
+        
+        echo "Application deployed successfully"
+
+    - name: Verify Deployment
+      run: |
+        echo "Verifying deployment..."
+        sleep 60
+        
+        kubectl get all -n ${{ env.NAMESPACE }}
+        kubectl get ingress -n ${{ env.NAMESPACE }}
