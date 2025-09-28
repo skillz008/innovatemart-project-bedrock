@@ -52,8 +52,8 @@ jobs:
 
     - name: Wait before recreation
       run: |
-        echo "Waiting 2 minutes before recreating cluster..."
-        sleep 120
+        echo "Waiting 1 minutes before recreating cluster..."
+        sleep 40
 
     - name: Create New EKS Cluster
       run: |
