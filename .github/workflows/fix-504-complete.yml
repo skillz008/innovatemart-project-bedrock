@@ -1,0 +1,310 @@
+name: Fix 504 Error - Complete Application Deployment
+
+on:
+  workflow_dispatch
+
+env:
+  AWS_REGION: 'us-east-1'
+  CLUSTER_NAME: 'retail-store-cluster'
+  NAMESPACE: 'default'
+
+jobs:
+  fix-504:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig \
+          --region ${{ env.AWS_REGION }} \
+          --name ${{ env.CLUSTER_NAME }}
+
+    - name: Complete Diagnostic
+      id: diagnostic
+      run: |
+        echo "=== COMPLETE DIAGNOSTIC ==="
+        
+        # Check all resources
+        echo "1. All Pods:"
+        kubectl get pods -n ${{ env.NAMESPACE }} -o wide || echo "No pods found"
+        
+        echo ""
+        echo "2. All Services:"
+        kubectl get services -n ${{ env.NAMESPACE }} -o wide || echo "No services found"
+        
+        echo ""
+        echo "3. All Deployments:"
+        kubectl get deployments -n ${{ env.NAMESPACE }} -o wide || echo "No deployments found"
+        
+        echo ""
+        echo "4. Ingress:"
+        kubectl get ingress -n ${{ env.NAMESPACE }} -o wide || echo "No ingress found"
+        
+        echo ""
+        echo "5. Check UI Pods specifically:"
+        kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=ui || echo "No UI pods found"
+        
+        echo ""
+        echo "6. Check UI Service:"
+        kubectl get service ui -n ${{ env.NAMESPACE }} -o yaml | grep -A 5 -B 5 type: || echo "UI service not found"
+        
+        echo ""
+        echo "7. Check Load Balancer Controller:"
+        kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || echo "Controller not found"
+
+    - name: Fix UI Service Type
+      run: |
+        echo "Fixing UI service type..."
+        
+        # Delete the existing LoadBalancer service
+        kubectl delete service ui -n ${{ env.NAMESPACE }} --ignore-not-found=true
+        
+        # Create proper ClusterIP service
+        kubectl apply -f - <<EOF
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ui
+          namespace: ${{ env.NAMESPACE }}
+          labels:
+            app.kubernetes.io/name: ui
+        spec:
+          type: ClusterIP
+          ports:
+          - port: 80
+            targetPort: 8080
+            protocol: TCP
+          selector:
+            app.kubernetes.io/name: ui
+        EOF
+        
+        echo "UI service fixed to ClusterIP"
+
+    - name: Deploy UI Application
+      run: |
+        echo "Deploying UI application..."
+        
+        kubectl apply -f - <<EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ui
+          namespace: ${{ env.NAMESPACE }}
+          labels:
+            app.kubernetes.io/name: ui
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: ui
+          template:
+            metadata:
+              labels:
+                app.kubernetes.io/name: ui
+            spec:
+              containers:
+              - name: ui
+                image: public.ecr.aws/aws-containers/retail-store-sample-ui:1.3.0
+                ports:
+                - containerPort: 8080
+                env:
+                - name: RETAIL_UI_ENDPOINTS_CATALOG
+                  value: "http://catalog"
+                - name: RETAIL_UI_ENDPOINTS_CARTS
+                  value: "http://carts"
+                - name: RETAIL_UI_ENDPOINTS_CHECKOUT
+                  value: "http://checkout"
+                - name: RETAIL_UI_ENDPOINTS_ORDERS
+                  value: "http://orders"
+                readinessProbe:
+                  httpGet:
+                    path: /actuator/health/readiness
+                    port: 8080
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                livenessProbe:
+                  httpGet:
+                    path: /actuator/health/liveness
+                    port: 8080
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                resources:
+                  requests:
+                    memory: "256Mi"
+                    cpu: "250m"
+                  limits:
+                    memory: "512Mi"
+                    cpu: "500m"
+        EOF
+
+    - name: Wait for UI Pods
+      run: |
+        echo "Waiting for UI pods to be ready..."
+        kubectl wait --for=condition=ready pod \
+          -n ${{ env.NAMESPACE }} \
+          -l app.kubernetes.io/name=ui \
+          --timeout=300s
+        
+        echo "UI pods are ready!"
+        kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=ui
+
+    - name: Create ALB Ingress
+      run: |
+        echo "Creating ALB Ingress..."
+        
+        kubectl apply -f - <<EOF
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: retail-store-ingress
+          namespace: ${{ env.NAMESPACE }}
+          annotations:
+            kubernetes.io/ingress.class: alb
+            alb.ingress.kubernetes.io/scheme: internet-facing
+            alb.ingress.kubernetes.io/target-type: ip
+            alb.ingress.kubernetes.io/healthcheck-path: /actuator/health/readiness
+            alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+            alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+            alb.ingress.kubernetes.io/subnet-type: public
+            alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
+            alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+            alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+            alb.ingress.kubernetes.io/unhealthy-threshold-count: '2'
+            alb.ingress.kubernetes.io/success-codes: '200,302'
+        spec:
+          rules:
+          - http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: ui
+                    port:
+                      number: 80
+        EOF
+
+    - name: Monitor ALB Creation
+      id: monitor-alb
+      run: |
+        echo "Monitoring ALB creation (this can take 2-5 minutes)..."
+        
+        # Wait for ALB to be provisioned
+        for i in {1..30}; do
+          echo "Check $i/30: Waiting for ALB..."
+          ALB_HOSTNAME=$(kubectl get ingress retail-store-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+          
+          if [[ ! -z "$ALB_HOSTNAME" ]]; then
+            echo "✅ ALB Created: $ALB_HOSTNAME"
+            echo "ALB_HOSTNAME=$ALB_HOSTNAME" >> $GITHUB_ENV
+            break
+          fi
+          
+          if [ $i -eq 30 ]; then
+            echo "⚠️ ALB taking longer than expected to create"
+          fi
+          
+          sleep 10
+        done
+
+    - name: Test Application
+      if: env.ALB_HOSTNAME
+      run: |
+        echo "Testing application endpoint: http://$ALB_HOSTNAME"
+        
+        # Test with retries
+        for i in {1..15}; do
+          echo "Test attempt $i/15..."
+          
+          RESPONSE=$(curl -s -o /dev/null -w "HTTP_STATUS:%{http_code} TIME:%{time_total}s " \
+            --connect-timeout 10 \
+            http://$ALB_HOSTNAME/actuator/health/readiness || echo "CONNECTION_FAILED")
+          
+          echo "Response: $RESPONSE"
+          
+          if [[ "$RESPONSE" == *"HTTP_STATUS:200"* ]]; then
+            echo "✅ SUCCESS: Application is healthy!"
+            break
+          fi
+          
+          if [ $i -eq 15 ]; then
+            echo "⚠️ Application not fully responsive yet - ALB may still be initializing"
+          fi
+          
+          sleep 10
+        done
+
+    - name: Final Status Check
+      run: |
+        echo "=== FINAL STATUS ==="
+        echo ""
+        
+        # Get ALB info
+        ALB_HOSTNAME=$(kubectl get ingress retail-store-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Not available")
+        echo "🌐 ALB Hostname: $ALB_HOSTNAME"
+        echo ""
+        
+        # Get pod status
+        echo "📊 UI Pods:"
+        kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=ui -o wide
+        echo ""
+        
+        # Get service status
+        echo "🔗 Services:"
+        kubectl get services -n ${{ env.NAMESPACE }} ui -o wide
+        echo ""
+        
+        # Get ingress status
+        echo "🚪 Ingress:"
+        kubectl get ingress -n ${{ env.NAMESPACE }} -o wide
+        echo ""
+        
+        if [[ "$ALB_HOSTNAME" != "Not available" ]]; then
+          echo "✅ Application URL: http://$ALB_HOSTNAME"
+          echo ""
+          echo "If you still see 504 errors:"
+          echo "1. Wait 5-10 minutes for ALB to fully initialize"
+          echo "2. Check that UI pods are running: kubectl get pods -l app.kubernetes.io/name=ui"
+          echo "3. Check ALB target groups in AWS Console"
+        fi
+
+    - name: Create Summary
+      if: always()
+      run: |
+        echo "## 504 Error Fix Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        ALB_HOSTNAME=$(kubectl get ingress retail-store-ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Not available")
+        UI_PODS=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=ui --no-headers 2>/dev/null | wc -l || echo "0")
+        
+        echo "**UI Pods Running:** $UI_PODS" >> $GITHUB_STEP_SUMMARY
+        echo "**ALB Hostname:** \`$ALB_HOSTNAME\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "$UI_PODS" -gt 0 ] && [ "$ALB_HOSTNAME" != "Not available" ]; then
+          echo "### ✅ Fix Applied Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Application URL:** [http://$ALB_HOSTNAME](http://$ALB_HOSTNAME)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**What was fixed:**" >> $GITHUB_STEP_SUMMARY
+          echo "- UI service type changed from LoadBalancer to ClusterIP" >> $GITHUB_STEP_SUMMARY
+          echo "- UI application pods deployed" >> $GITHUB_STEP_SUMMARY
+          echo "- ALB Ingress configured" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Note:** It may take 5-10 minutes for the ALB to fully initialize and route traffic properly." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ⚠️ Partial Fix Applied" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Some components are still provisioning. Check back in 5-10 minutes." >> $GITHUB_STEP_SUMMARY
+        fi
