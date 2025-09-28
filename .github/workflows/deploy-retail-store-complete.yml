@@ -15,7 +15,7 @@ on:
 
 env:
   AWS_REGION: 'us-east-1'
-  CLUSTER_NAME: 'retail-store-cluster'
+  CLUSTER_NAME: 'innovatemart-eks'
   NAMESPACE: 'default'
 
 jobs:
