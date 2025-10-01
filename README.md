@@ -43,10 +43,24 @@ As the Cloud DevOps Engineer, I designed, automated, and delivered this environm
      * `main` → runs `terraform apply`.
    * Manage AWS credentials securely (no hardcoding).
 
-5. ** **Networking Enhancements:**
+---
+
+## ⭐ Bonus Objectives
+
+5. **Managed Persistence Layer:**
+
+  * Replace in-cluster DBs with managed AWS services:
+
+    * RDS for PostgreSQL (orders service).
+    * RDS for MySQL (catalog service).
+    * DynamoDB (carts service).
+  * Update Kubernetes ConfigMaps/Secrets securely (no plaintext credentials in repo).
+
+6. ** **Networking Enhancements:**
 
   * Install **AWS Load Balancer Controller**.
   * Configure **Ingress** with ALB to expose `ui` service.
+
 ---
 
 ## 📂 Project Structure
