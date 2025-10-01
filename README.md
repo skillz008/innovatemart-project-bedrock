@@ -106,7 +106,7 @@ kubectl get pods -n retail-store
 
 ### 5. Access the Application
 
-* **UI Service URL:** [http://k8s-ui-ui-3f796120b2-555e72946f01b16c.elb.us-east-1.amazonaws.com/](http://<ALB-DNS-Name>)
+* **UI Service URL:** [http://k8s-ui-ui-3f796120b2-555e72946f01b16c.elb.us-east-1.amazonaws.com/](http://k8s-ui-ui-3f796120b2-555e72946f01b16c.elb.us-east-1.amazonaws.com/)
 
 ---
 
